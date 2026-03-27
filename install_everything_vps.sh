@@ -129,20 +129,17 @@ open_firewall() {
 
 write_stack_compose() {
   local dir="$1"
-  local src_dir="$2"
-  local public_ip="$3"
-  local turn_listen="$4"
-  local wg_port="$5"
-  local ui_port="$6"
-  local admin_pass="$7"
+  local public_ip="$2"
+  local turn_listen="$3"
+  local wg_port="$4"
+  local ui_port="$5"
+  local admin_pass="$6"
 
   mkdir -p "${dir}/vpn-data"
   cat > "${dir}/docker-compose.yml" <<EOF
 services:
   vk-turn-proxy:
-    build:
-      context: ${src_dir}
-      dockerfile: Dockerfile
+    image: vk-turn-proxy-local:latest
     restart: always
     network_mode: host
     command: ["./server", "-listen", "${turn_listen}", "-connect", "127.0.0.1:${wg_port}"]
@@ -189,6 +186,29 @@ ensure_source() {
   ok "Source ready."
 }
 
+write_server_dockerfile() {
+  local dir="$1"
+  cat > "${dir}/Dockerfile.server" <<'EOF'
+FROM golang:1.25-alpine AS builder
+WORKDIR /app
+COPY . .
+RUN go build -o server ./server
+
+FROM alpine:latest
+WORKDIR /app
+COPY --from=builder /app/server .
+ENTRYPOINT ["./server"]
+EOF
+}
+
+build_server_image() {
+  local src_dir="$1"
+  local stack_dir="$2"
+  log "Building local image vk-turn-proxy-local:latest..."
+  docker build -f "${stack_dir}/Dockerfile.server" -t vk-turn-proxy-local:latest "${src_dir}"
+  ok "Local image built."
+}
+
 main() {
   need_root
   ensure_docker
@@ -204,7 +224,9 @@ main() {
   log "Writing stack into ${INSTALL_DIR}"
   mkdir -p "${INSTALL_DIR}"
   ensure_source "${SRC_DIR}" "${REPO_URL}"
-  write_stack_compose "${INSTALL_DIR}" "${SRC_DIR}" "${public_ip}" "${VK_TURN_LISTEN}" "${WG_PORT}" "${WG_UI_PORT}" "${WG_ADMIN_PASS}"
+  write_server_dockerfile "${INSTALL_DIR}"
+  build_server_image "${SRC_DIR}" "${INSTALL_DIR}"
+  write_stack_compose "${INSTALL_DIR}" "${public_ip}" "${VK_TURN_LISTEN}" "${WG_PORT}" "${WG_UI_PORT}" "${WG_ADMIN_PASS}"
 
   log "Starting stack..."
   local COMPOSE
