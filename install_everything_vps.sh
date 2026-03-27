@@ -17,9 +17,9 @@
 # - Open wg-easy UI, create profile, download .conf
 # - Use that .conf in fyne-client (WireGuard tab) OR generate clients any way you like
 # ============================================================
-
+ 
 set -euo pipefail
-
+ 
 WG_ADMIN_PASS="${WG_ADMIN_PASS:-admin123}"
 WG_PORT="${WG_PORT:-51820}"
 WG_UI_PORT="${WG_UI_PORT:-51821}"
@@ -27,30 +27,30 @@ VK_TURN_LISTEN="${VK_TURN_LISTEN:-0.0.0.0:56000}"
 INSTALL_DIR="${INSTALL_DIR:-/opt/vk-turn-stack}"
 SRC_DIR="${SRC_DIR:-/opt/vk-turn-src}"
 REPO_URL="${REPO_URL:-https://github.com/DavidJackso/vk-turn-proxy.git}"
-
+ 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 CYAN='\033[0;36m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
-
+ 
 log()  { echo -e "${CYAN}>>> $*${NC}"; }
 ok()   { echo -e "${GREEN}✔  $*${NC}"; }
 warn() { echo -e "${YELLOW}⚠  $*${NC}"; }
 err()  { echo -e "${RED}✘  $*${NC}"; exit 1; }
-
+ 
 need_root() {
   if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
     err "Run as root: sudo bash $0"
   fi
 }
-
+ 
 have_cmd() { command -v "$1" >/dev/null 2>&1; }
-
+ 
 detect_public_ip() {
   curl -fsS ifconfig.me 2>/dev/null || curl -fsS api.ipify.org 2>/dev/null || true
 }
-
+ 
 ensure_docker() {
   if have_cmd docker; then
     ok "Docker already installed."
@@ -60,7 +60,7 @@ ensure_docker() {
   curl -fsSL https://get.docker.com | sh
   ok "Docker installed."
 }
-
+ 
 ensure_compose() {
   if docker compose version >/dev/null 2>&1; then
     ok "Docker Compose plugin available."
@@ -76,7 +76,7 @@ ensure_compose() {
   docker compose version >/dev/null 2>&1 || err "Docker Compose not available after install."
   ok "Docker Compose plugin installed."
 }
-
+ 
 ensure_git() {
   if have_cmd git; then
     ok "git already installed."
@@ -87,7 +87,7 @@ ensure_git() {
   apt-get install -y git >/dev/null 2>&1 || err "Failed to install git."
   ok "git installed."
 }
-
+ 
 compose_cmd() {
   if docker compose version >/dev/null 2>&1; then
     echo "docker compose"
@@ -99,26 +99,24 @@ compose_cmd() {
   fi
   err "Neither docker compose nor docker-compose is available."
 }
-
+ 
 wg_password_hash() {
   local pass="$1"
   # wg-easy v14+ requires bcrypt hash in PASSWORD_HASH
-  # Use upstream helper to avoid format mismatches:
-  #   docker run ghcr.io/wg-easy/wg-easy wgpw mypass
-  # Output is usually: PASSWORD_HASH='$2y$10$...'
   docker run --rm ghcr.io/wg-easy/wg-easy wgpw "${pass}" 2>/dev/null \
-    | tr -d '\r\n' \
-    | sed -E "s/^PASSWORD_HASH='(.*)'$/\\1/"
+    | tr -d '\r' \
+    | sed -nE "s/^PASSWORD_HASH='(.*)'$/\\1/p" \
+    | head -n 1
 }
-
+ 
 open_firewall() {
   local turn_listen="$1"
   local wg_port="$2"
   local ui_port="$3"
-
+ 
   local turn_port
   turn_port="$(echo "${turn_listen}" | awk -F: '{print $NF}')"
-
+ 
   log "Opening firewall ports: ${turn_port}/udp, ${wg_port}/udp, ${ui_port}/tcp (best-effort)"
   if have_cmd ufw; then
     ufw allow "${turn_port}/udp" comment 'vk-turn-proxy' >/dev/null 2>&1 || true
@@ -137,7 +135,7 @@ open_firewall() {
   fi
   warn "Firewall tool not detected. Ensure ports are open manually."
 }
-
+ 
 write_stack_compose() {
   local dir="$1"
   local public_ip="$2"
@@ -145,15 +143,18 @@ write_stack_compose() {
   local wg_port="$4"
   local ui_port="$5"
   local admin_pass_hash="$6"
-
+ 
   mkdir -p "${dir}/vpn-data"
-  # Keep bcrypt hash in an env_file to avoid any interpolation pitfalls.
-  # (Compose treats .env specially for variable substitution and still expands $2a$... as variables.)
-  cat > "${dir}/wg-easy.env" <<EOF
-PASSWORD_HASH=${admin_pass_hash}
-EOF
+  rm -f "${dir}/.env"
+ 
+  # Экранируем все $ → $$ чтобы docker-compose не интерпретировал
+  # bcrypt-хеш как переменные окружения при чтении env_file
+  local admin_pass_hash_escaped
+  admin_pass_hash_escaped="$(printf '%s' "${admin_pass_hash}" | sed 's/\$/\$\$/g')"
+ 
+  printf "PASSWORD_HASH=%s\n" "${admin_pass_hash_escaped}" > "${dir}/wg-easy.env"
   chmod 600 "${dir}/wg-easy.env"
-
+ 
   cat > "${dir}/docker-compose.yml" <<EOF
 services:
   vk-turn-proxy:
@@ -163,7 +164,7 @@ services:
     command: ["./server", "-listen", "${turn_listen}", "-connect", "127.0.0.1:${wg_port}"]
     cap_add:
       - NET_ADMIN
-
+ 
   wg-easy:
     image: ghcr.io/wg-easy/wg-easy
     container_name: wg-easy
@@ -189,7 +190,7 @@ services:
       - net.ipv4.conf.all.src_valid_mark=1
 EOF
 }
-
+ 
 ensure_source() {
   local src_dir="$1"
   local repo_url="$2"
@@ -204,7 +205,7 @@ ensure_source() {
   git clone --depth=1 "${repo_url}" "${src_dir}" >/dev/null 2>&1 || err "Failed to clone source."
   ok "Source ready."
 }
-
+ 
 write_server_dockerfile() {
   local dir="$1"
   cat > "${dir}/Dockerfile.server" <<'EOF'
@@ -212,14 +213,14 @@ FROM golang:1.25-alpine AS builder
 WORKDIR /app
 COPY . .
 RUN go build -o server ./server
-
+ 
 FROM alpine:latest
 WORKDIR /app
 COPY --from=builder /app/server .
 ENTRYPOINT ["./server"]
 EOF
 }
-
+ 
 build_server_image() {
   local src_dir="$1"
   local stack_dir="$2"
@@ -227,36 +228,39 @@ build_server_image() {
   docker build -f "${stack_dir}/Dockerfile.server" -t vk-turn-proxy-local:latest "${src_dir}"
   ok "Local image built."
 }
-
+ 
 main() {
   need_root
   ensure_docker
   ensure_compose
   ensure_git
   have_cmd curl || err "curl is required"
-
+ 
   local public_ip
   public_ip="$(detect_public_ip)"
   [[ -n "${public_ip}" ]] || err "Failed to detect public IP."
   ok "Public IP: ${public_ip}"
-
+ 
   log "Writing stack into ${INSTALL_DIR}"
   mkdir -p "${INSTALL_DIR}"
   ensure_source "${SRC_DIR}" "${REPO_URL}"
   write_server_dockerfile "${INSTALL_DIR}"
   build_server_image "${SRC_DIR}" "${INSTALL_DIR}"
+ 
   local WG_ADMIN_PASS_HASH
   WG_ADMIN_PASS_HASH="$(wg_password_hash "${WG_ADMIN_PASS}")"
+  [[ -n "${WG_ADMIN_PASS_HASH}" ]] || err "Failed to generate password hash."
+ 
   write_stack_compose "${INSTALL_DIR}" "${public_ip}" "${VK_TURN_LISTEN}" "${WG_PORT}" "${WG_UI_PORT}" "${WG_ADMIN_PASS_HASH}"
-
+ 
   log "Starting stack..."
   local COMPOSE
   COMPOSE="$(compose_cmd)"
   (cd "${INSTALL_DIR}" && ${COMPOSE} pull >/dev/null 2>&1 || true)
   (cd "${INSTALL_DIR}" && ${COMPOSE} up -d)
-
+ 
   open_firewall "${VK_TURN_LISTEN}" "${WG_PORT}" "${WG_UI_PORT}"
-
+ 
   echo ""
   echo -e "${GREEN}╔══════════════════════════════════════════════════╗${NC}"
   echo -e "${GREEN}║              Stack setup complete                ║${NC}"
@@ -273,6 +277,5 @@ main() {
   echo -e "  ${YELLOW}Note:${NC} Existing services/containers were not touched."
   echo ""
 }
-
+ 
 main "$@"
-
