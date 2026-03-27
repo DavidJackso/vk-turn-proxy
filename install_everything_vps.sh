@@ -118,6 +118,13 @@ wg_password_hash() {
   htpasswd -bnBC 10 "" "${pass}" | tr -d ':\n'
 }
 
+escape_compose_dollars() {
+  # docker-compose performs variable interpolation on $FOO, so bcrypt hashes must escape '$' as '$$'
+  # See: https://docs.docker.com/compose/compose-file/interpolation/
+  local s="$1"
+  echo "${s//$/$$}"
+}
+
 open_firewall() {
   local turn_listen="$1"
   local wg_port="$2"
@@ -247,6 +254,7 @@ main() {
   build_server_image "${SRC_DIR}" "${INSTALL_DIR}"
   local WG_ADMIN_PASS_HASH
   WG_ADMIN_PASS_HASH="$(wg_password_hash "${WG_ADMIN_PASS}")"
+  WG_ADMIN_PASS_HASH="$(escape_compose_dollars "${WG_ADMIN_PASS_HASH}")"
   write_stack_compose "${INSTALL_DIR}" "${public_ip}" "${VK_TURN_LISTEN}" "${WG_PORT}" "${WG_UI_PORT}" "${WG_ADMIN_PASS_HASH}"
 
   log "Starting stack..."
