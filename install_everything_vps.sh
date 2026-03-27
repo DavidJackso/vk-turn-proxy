@@ -1,0 +1,192 @@
+#!/usr/bin/env bash
+# ============================================================
+# One-shot VPS installer (quick start, safe by default)
+#
+# Installs and starts:
+# - wg-easy (WireGuard server + UI) on a dedicated UDP port
+# - vk-turn-proxy (DTLS server) forwarding to WireGuard UDP port
+#
+# It does NOT remove/stop any existing VPN/proxy services by default.
+#
+# Usage:
+#   sudo bash install_everything_vps.sh
+#   sudo WG_ADMIN_PASS='...' bash install_everything_vps.sh
+#   sudo VK_TURN_LISTEN='0.0.0.0:56000' WG_PORT=51820 WG_UI_PORT=51821 bash install_everything_vps.sh
+#
+# After finish:
+# - Open wg-easy UI, create profile, download .conf
+# - Use that .conf in fyne-client (WireGuard tab) OR generate clients any way you like
+# ============================================================
+
+set -euo pipefail
+
+WG_ADMIN_PASS="${WG_ADMIN_PASS:-admin123}"
+WG_PORT="${WG_PORT:-51820}"
+WG_UI_PORT="${WG_UI_PORT:-51821}"
+VK_TURN_LISTEN="${VK_TURN_LISTEN:-0.0.0.0:56000}"
+INSTALL_DIR="${INSTALL_DIR:-/opt/vk-turn-stack}"
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+CYAN='\033[0;36m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+log()  { echo -e "${CYAN}>>> $*${NC}"; }
+ok()   { echo -e "${GREEN}✔  $*${NC}"; }
+warn() { echo -e "${YELLOW}⚠  $*${NC}"; }
+err()  { echo -e "${RED}✘  $*${NC}"; exit 1; }
+
+need_root() {
+  if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+    err "Run as root: sudo bash $0"
+  fi
+}
+
+have_cmd() { command -v "$1" >/dev/null 2>&1; }
+
+detect_public_ip() {
+  curl -fsS ifconfig.me 2>/dev/null || curl -fsS api.ipify.org 2>/dev/null || true
+}
+
+ensure_docker() {
+  if have_cmd docker; then
+    ok "Docker already installed."
+    return
+  fi
+  log "Installing Docker..."
+  curl -fsSL https://get.docker.com | sh
+  ok "Docker installed."
+}
+
+ensure_compose() {
+  if docker compose version >/dev/null 2>&1; then
+    ok "Docker Compose plugin available."
+    return
+  fi
+  if have_cmd docker-compose; then
+    ok "docker-compose available."
+    return
+  fi
+  log "Installing Docker Compose plugin..."
+  apt-get update -y >/dev/null 2>&1 || true
+  apt-get install -y docker-compose-plugin >/dev/null 2>&1 || true
+  docker compose version >/dev/null 2>&1 || err "Docker Compose not available after install."
+  ok "Docker Compose plugin installed."
+}
+
+open_firewall() {
+  local turn_listen="$1"
+  local wg_port="$2"
+  local ui_port="$3"
+
+  local turn_port
+  turn_port="$(echo "${turn_listen}" | awk -F: '{print $NF}')"
+
+  log "Opening firewall ports: ${turn_port}/udp, ${wg_port}/udp, ${ui_port}/tcp (best-effort)"
+  if have_cmd ufw; then
+    ufw allow "${turn_port}/udp" comment 'vk-turn-proxy' >/dev/null 2>&1 || true
+    ufw allow "${wg_port}/udp" comment 'wireguard' >/dev/null 2>&1 || true
+    ufw allow "${ui_port}/tcp" comment 'wg-easy ui' >/dev/null 2>&1 || true
+    ok "ufw rules applied (or already exist)"
+    return
+  fi
+  if have_cmd firewall-cmd; then
+    firewall-cmd --permanent --add-port="${turn_port}/udp" >/dev/null 2>&1 || true
+    firewall-cmd --permanent --add-port="${wg_port}/udp" >/dev/null 2>&1 || true
+    firewall-cmd --permanent --add-port="${ui_port}/tcp" >/dev/null 2>&1 || true
+    firewall-cmd --reload >/dev/null 2>&1 || true
+    ok "firewalld rules applied (or already exist)"
+    return
+  fi
+  warn "Firewall tool not detected. Ensure ports are open manually."
+}
+
+write_stack_compose() {
+  local dir="$1"
+  local public_ip="$2"
+  local turn_listen="$3"
+  local wg_port="$4"
+  local ui_port="$5"
+  local admin_pass="$6"
+
+  mkdir -p "${dir}/vpn-data"
+  cat > "${dir}/docker-compose.yml" <<EOF
+version: '3.8'
+services:
+  vk-turn-proxy:
+    image: ghcr.io/davidjackso/vk-turn-proxy:latest
+    # Fallback to local build if image isn't available:
+    # build:
+    #   context: /opt/vk-turn-proxy
+    restart: always
+    network_mode: host
+    command: ["./server", "-listen", "${turn_listen}", "-connect", "127.0.0.1:${wg_port}"]
+    cap_add:
+      - NET_ADMIN
+
+  wg-easy:
+    image: ghcr.io/wg-easy/wg-easy
+    container_name: wg-easy
+    restart: always
+    ports:
+      - "${wg_port}:${wg_port}/udp"
+      - "${ui_port}:51821/tcp"
+    environment:
+      - WG_HOST=${public_ip}
+      - PASSWORD=${admin_pass}
+      - WG_PORT=${wg_port}
+      - WG_DEFAULT_ADDRESS=10.8.0.x
+      - WG_DEFAULT_DNS=1.1.1.1
+      - WG_ALLOWED_IPS=0.0.0.0/0, ::/0
+    volumes:
+      - ./vpn-data:/etc/wireguard
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    sysctls:
+      - net.ipv4.ip_forward=1
+      - net.ipv4.conf.all.src_valid_mark=1
+EOF
+}
+
+main() {
+  need_root
+  ensure_docker
+  ensure_compose
+  have_cmd curl || err "curl is required"
+
+  local public_ip
+  public_ip="$(detect_public_ip)"
+  [[ -n "${public_ip}" ]] || err "Failed to detect public IP."
+  ok "Public IP: ${public_ip}"
+
+  log "Writing stack into ${INSTALL_DIR}"
+  mkdir -p "${INSTALL_DIR}"
+  write_stack_compose "${INSTALL_DIR}" "${public_ip}" "${VK_TURN_LISTEN}" "${WG_PORT}" "${WG_UI_PORT}" "${WG_ADMIN_PASS}"
+
+  log "Starting stack..."
+  (cd "${INSTALL_DIR}" && docker compose pull >/dev/null 2>&1 || true)
+  (cd "${INSTALL_DIR}" && docker compose up -d)
+
+  open_firewall "${VK_TURN_LISTEN}" "${WG_PORT}" "${WG_UI_PORT}"
+
+  echo ""
+  echo -e "${GREEN}╔══════════════════════════════════════════════════╗${NC}"
+  echo -e "${GREEN}║              Stack setup complete                ║${NC}"
+  echo -e "${GREEN}╚══════════════════════════════════════════════════╝${NC}"
+  echo ""
+  echo -e "  ${CYAN}TURN/DTLS listen${NC} → UDP ${public_ip}:$(echo "${VK_TURN_LISTEN}" | awk -F: '{print $NF}')"
+  echo -e "  ${CYAN}WireGuard (WG)${NC}  → UDP ${public_ip}:${WG_PORT}"
+  echo -e "  ${CYAN}wg-easy UI${NC}      → http://${public_ip}:${WG_UI_PORT} (pass: ${WG_ADMIN_PASS})"
+  echo ""
+  echo -e "  ${YELLOW}Next:${NC}"
+  echo -e "  1) Open wg-easy UI → create profile → download .conf"
+  echo -e "  2) Use fyne-client (WireGuard tab) and paste .conf"
+  echo ""
+  echo -e "  ${YELLOW}Note:${NC} Existing services/containers were not touched."
+  echo ""
+}
+
+main "$@"
+

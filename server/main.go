@@ -11,7 +11,6 @@ import (
 	"os/signal"
 	"sync"
 	"syscall"
-	"time"
 
 	"github.com/pion/dtls/v3"
 	"github.com/pion/dtls/v3/pkg/crypto/selfsign"
@@ -44,12 +43,8 @@ func main() {
 	// Generate a certificate and private key to secure the connection
 	certificate, genErr := selfsign.GenerateSelfSigned()
 	if genErr != nil {
-		panic(err)
+		panic(genErr)
 	}
-
-	//
-	// Everything below is the pion-DTLS API! Thanks for using it ❤️.
-	//
 
 	// Prepare the configuration of the DTLS connection
 	config := &dtls.Config{
@@ -87,103 +82,6 @@ func main() {
 			continue
 		}
 		wg1.Add(1)
-		go func(conn net.Conn) {
-			defer wg1.Done()
-			defer conn.Close() // graceful shutdown
-			var err error = nil
-			log.Printf("Connection from %s\n", conn.RemoteAddr())
-			// `conn` is of type `net.Conn` but may be casted to `dtls.Conn`
-			// using `dtlsConn := conn.(*dtls.Conn)` in order to to expose
-			// functions like `ConnectionState` etc.
-
-			// Perform the handshake with a 30-second timeout
-			ctx1, cancel1 := context.WithTimeout(ctx, 30*time.Second)
-			dtlsConn, ok := conn.(*dtls.Conn)
-			if !ok {
-				log.Println("Type error")
-				cancel1()
-				return
-			}
-			log.Println("Start handshake")
-			if err = dtlsConn.HandshakeContext(ctx1); err != nil {
-				log.Println(err)
-				cancel1()
-				return
-			}
-			cancel1()
-			log.Println("Handshake done")
-
-			serverConn, err := net.Dial("udp", *connect)
-			if err != nil {
-				log.Println(err)
-				return
-			}
-			defer func() {
-				if err = serverConn.Close(); err != nil {
-					log.Printf("failed to close outgoing connection: %s", err)
-					return
-				}
-			}()
-
-			var wg sync.WaitGroup
-			wg.Add(2)
-			ctx2, cancel2 := context.WithCancel(ctx)
-			context.AfterFunc(ctx2, func() {
-				conn.SetDeadline(time.Now())
-				serverConn.SetDeadline(time.Now())
-			})
-			go func() {
-				defer wg.Done()
-				defer cancel2()
-				buf := make([]byte, 1600)
-				for {
-					select {
-					case <-ctx2.Done():
-						return
-					default:
-					}
-					conn.SetReadDeadline(time.Now().Add(time.Minute * 30))
-					n, err1 := conn.Read(buf)
-					if err1 != nil {
-						log.Printf("Failed: %s", err1)
-						return
-					}
-
-					serverConn.SetWriteDeadline(time.Now().Add(time.Minute * 30))
-					_, err1 = serverConn.Write(buf[:n])
-					if err1 != nil {
-						log.Printf("Failed: %s", err1)
-						return
-					}
-				}
-			}()
-			go func() {
-				defer wg.Done()
-				defer cancel2()
-				buf := make([]byte, 1600)
-				for {
-					select {
-					case <-ctx2.Done():
-						return
-					default:
-					}
-					serverConn.SetReadDeadline(time.Now().Add(time.Minute * 30))
-					n, err1 := serverConn.Read(buf)
-					if err1 != nil {
-						log.Printf("Failed: %s", err1)
-						return
-					}
-
-					conn.SetWriteDeadline(time.Now().Add(time.Minute * 30))
-					_, err1 = conn.Write(buf[:n])
-					if err1 != nil {
-						log.Printf("Failed: %s", err1)
-						return
-					}
-				}
-			}()
-			wg.Wait()
-			log.Printf("Connection closed: %s\n", conn.RemoteAddr())
-		}(conn)
+		go handleConnection(ctx, &wg1, conn, *connect)
 	}
 }

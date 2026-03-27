@@ -13,6 +13,34 @@
 ```
 ./server -listen 0.0.0.0:56000 -connect 127.0.0.1:<порт wg>
 ```
+
+## Быстрый старт (VPS + клиент)
+
+### 1) VPS: поднять всё одной командой (WireGuard + vk-turn-proxy)
+На VPS (Ubuntu/Debian), от root:
+
+```bash
+sudo bash install_everything_vps.sh
+```
+
+Скрипт поднимет:
+- `wg-easy` (WireGuard) на `51820/udp` (или выберет свободный)
+- `vk-turn-proxy` на `56000/udp` и будет форвардить в WireGuard (UDP)
+
+После запуска:
+- открой `wg-easy UI` (адрес выведется)
+- создай профиль и скачай `.conf`
+- вставь `.conf` в наше приложение (`fyne-client`, вкладка WireGuard) и нажми CONNECT
+
+### 2) Очистка сторонних сервисов на VPS (опционально)
+Удаление сторонних VPN/прокси сервисов и контейнеров делайте вручную: это слишком опасно автоматизировать в рамках этого проекта.
+
+### Сервер (если на VPS уже крутятся другие сервисы)
+Используйте тот же `install_everything_vps.sh`, но задайте свободные порты:
+
+```bash
+sudo WG_PORT=51830 WG_UI_PORT=51831 VK_TURN_LISTEN=0.0.0.0:56010 bash install_everything_vps.sh
+```
 ### Клиент
 #### Android
 
