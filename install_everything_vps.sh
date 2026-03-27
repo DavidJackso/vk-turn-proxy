@@ -147,11 +147,12 @@ write_stack_compose() {
   local admin_pass_hash="$6"
 
   mkdir -p "${dir}/vpn-data"
-  # Keep bcrypt hash in .env to avoid inline interpolation pitfalls.
-  cat > "${dir}/.env" <<EOF
+  # Keep bcrypt hash in an env_file to avoid any interpolation pitfalls.
+  # (Compose treats .env specially for variable substitution and still expands $2a$... as variables.)
+  cat > "${dir}/wg-easy.env" <<EOF
 PASSWORD_HASH=${admin_pass_hash}
 EOF
-  chmod 600 "${dir}/.env"
+  chmod 600 "${dir}/wg-easy.env"
 
   cat > "${dir}/docker-compose.yml" <<EOF
 services:
@@ -170,9 +171,10 @@ services:
     ports:
       - "${wg_port}:${wg_port}/udp"
       - "${ui_port}:51821/tcp"
+    env_file:
+      - ./wg-easy.env
     environment:
       - WG_HOST=${public_ip}
-      - PASSWORD_HASH=\${PASSWORD_HASH}
       - WG_PORT=${wg_port}
       - WG_DEFAULT_ADDRESS=10.8.0.x
       - WG_DEFAULT_DNS=1.1.1.1
