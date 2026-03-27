@@ -100,6 +100,24 @@ compose_cmd() {
   err "Neither docker compose nor docker-compose is available."
 }
 
+ensure_htpasswd() {
+  if have_cmd htpasswd; then
+    ok "htpasswd already installed."
+    return
+  fi
+  log "Installing apache2-utils (for htpasswd)..."
+  apt-get update -y >/dev/null 2>&1 || true
+  apt-get install -y apache2-utils >/dev/null 2>&1 || err "Failed to install apache2-utils."
+  ok "htpasswd installed."
+}
+
+wg_password_hash() {
+  local pass="$1"
+  # wg-easy v14+ requires bcrypt hash in PASSWORD_HASH
+  # Output format: $2y$... (bcrypt). Remove the leading ":" from htpasswd formatting.
+  htpasswd -bnBC 10 "" "${pass}" | tr -d ':\n'
+}
+
 open_firewall() {
   local turn_listen="$1"
   local wg_port="$2"
@@ -133,7 +151,7 @@ write_stack_compose() {
   local turn_listen="$3"
   local wg_port="$4"
   local ui_port="$5"
-  local admin_pass="$6"
+  local admin_pass_hash="$6"
 
   mkdir -p "${dir}/vpn-data"
   cat > "${dir}/docker-compose.yml" <<EOF
@@ -155,7 +173,7 @@ services:
       - "${ui_port}:51821/tcp"
     environment:
       - WG_HOST=${public_ip}
-      - PASSWORD=${admin_pass}
+      - PASSWORD_HASH=${admin_pass_hash}
       - WG_PORT=${wg_port}
       - WG_DEFAULT_ADDRESS=10.8.0.x
       - WG_DEFAULT_DNS=1.1.1.1
@@ -214,6 +232,7 @@ main() {
   ensure_docker
   ensure_compose
   ensure_git
+  ensure_htpasswd
   have_cmd curl || err "curl is required"
 
   local public_ip
@@ -226,7 +245,9 @@ main() {
   ensure_source "${SRC_DIR}" "${REPO_URL}"
   write_server_dockerfile "${INSTALL_DIR}"
   build_server_image "${SRC_DIR}" "${INSTALL_DIR}"
-  write_stack_compose "${INSTALL_DIR}" "${public_ip}" "${VK_TURN_LISTEN}" "${WG_PORT}" "${WG_UI_PORT}" "${WG_ADMIN_PASS}"
+  local WG_ADMIN_PASS_HASH
+  WG_ADMIN_PASS_HASH="$(wg_password_hash "${WG_ADMIN_PASS}")"
+  write_stack_compose "${INSTALL_DIR}" "${public_ip}" "${VK_TURN_LISTEN}" "${WG_PORT}" "${WG_UI_PORT}" "${WG_ADMIN_PASS_HASH}"
 
   log "Starting stack..."
   local COMPOSE
