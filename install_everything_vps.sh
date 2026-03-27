@@ -161,7 +161,9 @@ services:
     image: vk-turn-proxy-local:latest
     restart: always
     network_mode: host
-    command: ["./server", "-listen", "${turn_listen}", "-connect", "127.0.0.1:${wg_port}"]
+    # ENTRYPOINT is already ["./server"] in the image; avoid putting "./server" as argv[0]
+    # because Go's flag parser stops at the first non-flag argument.
+    command: ["-listen", "${turn_listen}", "-connect", "127.0.0.1:${wg_port}"]
     cap_add:
       - NET_ADMIN
  
