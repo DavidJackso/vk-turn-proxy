@@ -100,29 +100,15 @@ compose_cmd() {
   err "Neither docker compose nor docker-compose is available."
 }
 
-ensure_htpasswd() {
-  if have_cmd htpasswd; then
-    ok "htpasswd already installed."
-    return
-  fi
-  log "Installing apache2-utils (for htpasswd)..."
-  apt-get update -y >/dev/null 2>&1 || true
-  apt-get install -y apache2-utils >/dev/null 2>&1 || err "Failed to install apache2-utils."
-  ok "htpasswd installed."
-}
-
 wg_password_hash() {
   local pass="$1"
   # wg-easy v14+ requires bcrypt hash in PASSWORD_HASH
-  # Output format: $2y$... (bcrypt). Remove the leading ":" from htpasswd formatting.
-  htpasswd -bnBC 10 "" "${pass}" | tr -d ':\n'
-}
-
-escape_compose_dollars() {
-  # docker-compose performs variable interpolation on $FOO, so bcrypt hashes must escape '$' as '$$'
-  # See: https://docs.docker.com/compose/compose-file/interpolation/
-  local s="$1"
-  echo "${s//$/$$}"
+  # Use upstream helper to avoid format mismatches:
+  #   docker run ghcr.io/wg-easy/wg-easy wgpw mypass
+  # Output is usually: PASSWORD_HASH='$2y$10$...'
+  docker run --rm ghcr.io/wg-easy/wg-easy wgpw "${pass}" 2>/dev/null \
+    | tr -d '\r\n' \
+    | sed -E "s/^PASSWORD_HASH='(.*)'$/\\1/"
 }
 
 open_firewall() {
@@ -161,6 +147,12 @@ write_stack_compose() {
   local admin_pass_hash="$6"
 
   mkdir -p "${dir}/vpn-data"
+  # Keep bcrypt hash in .env to avoid inline interpolation pitfalls.
+  cat > "${dir}/.env" <<EOF
+PASSWORD_HASH=${admin_pass_hash}
+EOF
+  chmod 600 "${dir}/.env"
+
   cat > "${dir}/docker-compose.yml" <<EOF
 services:
   vk-turn-proxy:
@@ -180,7 +172,7 @@ services:
       - "${ui_port}:51821/tcp"
     environment:
       - WG_HOST=${public_ip}
-      - PASSWORD_HASH=${admin_pass_hash}
+      - PASSWORD_HASH=\${PASSWORD_HASH}
       - WG_PORT=${wg_port}
       - WG_DEFAULT_ADDRESS=10.8.0.x
       - WG_DEFAULT_DNS=1.1.1.1
@@ -239,7 +231,6 @@ main() {
   ensure_docker
   ensure_compose
   ensure_git
-  ensure_htpasswd
   have_cmd curl || err "curl is required"
 
   local public_ip
@@ -254,7 +245,6 @@ main() {
   build_server_image "${SRC_DIR}" "${INSTALL_DIR}"
   local WG_ADMIN_PASS_HASH
   WG_ADMIN_PASS_HASH="$(wg_password_hash "${WG_ADMIN_PASS}")"
-  WG_ADMIN_PASS_HASH="$(escape_compose_dollars "${WG_ADMIN_PASS_HASH}")"
   write_stack_compose "${INSTALL_DIR}" "${public_ip}" "${VK_TURN_LISTEN}" "${WG_PORT}" "${WG_UI_PORT}" "${WG_ADMIN_PASS_HASH}"
 
   log "Starting stack..."
