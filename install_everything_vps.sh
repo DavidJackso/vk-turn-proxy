@@ -25,6 +25,8 @@ WG_PORT="${WG_PORT:-51820}"
 WG_UI_PORT="${WG_UI_PORT:-51821}"
 VK_TURN_LISTEN="${VK_TURN_LISTEN:-0.0.0.0:56000}"
 INSTALL_DIR="${INSTALL_DIR:-/opt/vk-turn-stack}"
+SRC_DIR="${SRC_DIR:-/opt/vk-turn-src}"
+REPO_URL="${REPO_URL:-https://github.com/DavidJackso/vk-turn-proxy.git}"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -75,6 +77,29 @@ ensure_compose() {
   ok "Docker Compose plugin installed."
 }
 
+ensure_git() {
+  if have_cmd git; then
+    ok "git already installed."
+    return
+  fi
+  log "Installing git..."
+  apt-get update -y >/dev/null 2>&1 || true
+  apt-get install -y git >/dev/null 2>&1 || err "Failed to install git."
+  ok "git installed."
+}
+
+compose_cmd() {
+  if docker compose version >/dev/null 2>&1; then
+    echo "docker compose"
+    return
+  fi
+  if have_cmd docker-compose; then
+    echo "docker-compose"
+    return
+  fi
+  err "Neither docker compose nor docker-compose is available."
+}
+
 open_firewall() {
   local turn_listen="$1"
   local wg_port="$2"
@@ -104,21 +129,20 @@ open_firewall() {
 
 write_stack_compose() {
   local dir="$1"
-  local public_ip="$2"
-  local turn_listen="$3"
-  local wg_port="$4"
-  local ui_port="$5"
-  local admin_pass="$6"
+  local src_dir="$2"
+  local public_ip="$3"
+  local turn_listen="$4"
+  local wg_port="$5"
+  local ui_port="$6"
+  local admin_pass="$7"
 
   mkdir -p "${dir}/vpn-data"
   cat > "${dir}/docker-compose.yml" <<EOF
-version: '3.8'
 services:
   vk-turn-proxy:
-    image: ghcr.io/davidjackso/vk-turn-proxy:latest
-    # Fallback to local build if image isn't available:
-    # build:
-    #   context: /opt/vk-turn-proxy
+    build:
+      context: ${src_dir}
+      dockerfile: Dockerfile
     restart: always
     network_mode: host
     command: ["./server", "-listen", "${turn_listen}", "-connect", "127.0.0.1:${wg_port}"]
@@ -150,10 +174,26 @@ services:
 EOF
 }
 
+ensure_source() {
+  local src_dir="$1"
+  local repo_url="$2"
+  if [[ -d "${src_dir}/.git" ]]; then
+    log "Updating source in ${src_dir}..."
+    git -C "${src_dir}" pull --ff-only >/dev/null 2>&1 || warn "git pull failed, using existing source."
+    ok "Source ready."
+    return
+  fi
+  log "Cloning source from ${repo_url} to ${src_dir}..."
+  rm -rf "${src_dir}"
+  git clone --depth=1 "${repo_url}" "${src_dir}" >/dev/null 2>&1 || err "Failed to clone source."
+  ok "Source ready."
+}
+
 main() {
   need_root
   ensure_docker
   ensure_compose
+  ensure_git
   have_cmd curl || err "curl is required"
 
   local public_ip
@@ -163,11 +203,14 @@ main() {
 
   log "Writing stack into ${INSTALL_DIR}"
   mkdir -p "${INSTALL_DIR}"
-  write_stack_compose "${INSTALL_DIR}" "${public_ip}" "${VK_TURN_LISTEN}" "${WG_PORT}" "${WG_UI_PORT}" "${WG_ADMIN_PASS}"
+  ensure_source "${SRC_DIR}" "${REPO_URL}"
+  write_stack_compose "${INSTALL_DIR}" "${SRC_DIR}" "${public_ip}" "${VK_TURN_LISTEN}" "${WG_PORT}" "${WG_UI_PORT}" "${WG_ADMIN_PASS}"
 
   log "Starting stack..."
-  (cd "${INSTALL_DIR}" && docker compose pull >/dev/null 2>&1 || true)
-  (cd "${INSTALL_DIR}" && docker compose up -d)
+  local COMPOSE
+  COMPOSE="$(compose_cmd)"
+  (cd "${INSTALL_DIR}" && ${COMPOSE} pull >/dev/null 2>&1 || true)
+  (cd "${INSTALL_DIR}" && ${COMPOSE} up -d)
 
   open_firewall "${VK_TURN_LISTEN}" "${WG_PORT}" "${WG_UI_PORT}"
 
